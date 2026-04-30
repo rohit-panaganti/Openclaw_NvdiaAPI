@@ -1,0 +1,4 @@
+# Never commit actual config (contains API keys)
+openclaw.json
+*.env
+.env*
