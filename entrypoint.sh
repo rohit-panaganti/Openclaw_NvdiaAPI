@@ -49,6 +49,24 @@ console.log('[entrypoint] tools.web.search=' + JSON.stringify(cfg.tools.web.sear
 console.log('[entrypoint] tools.profile=' + (cfg.tools.profile || 'unset'));
 "
 
+# Force Tavily to load at gateway startup by flipping its manifest's activation.onStartup to true.
+# OpenClaw normally lazy-loads Tavily, but the on-demand loader fails in this environment, so
+# we promote it to the startup plugin set (same path the other 8 plugins use).
+echo "[entrypoint] === PATCHING TAVILY MANIFEST ==="
+node -e "
+const fs = require('fs');
+const path = require('path');
+const globalRoot = process.env.NODE_PATH || '/usr/local/lib/node_modules';
+const manifestPath = path.join(globalRoot, 'openclaw', 'dist', 'extensions', 'tavily', 'openclaw.plugin.json');
+if (!fs.existsSync(manifestPath)) { console.log('[manifest-patch] tavily manifest not found at', manifestPath); process.exit(0); }
+const m = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+const before = m.activation && m.activation.onStartup;
+if (!m.activation) m.activation = {};
+m.activation.onStartup = true;
+fs.writeFileSync(manifestPath, JSON.stringify(m, null, 2));
+console.log('[manifest-patch] tavily activation.onStartup:', before, '->', m.activation.onStartup);
+"
+
 echo "[entrypoint] === TAVILY PREFLIGHT ==="
 node -e "
 const fs = require('fs');
