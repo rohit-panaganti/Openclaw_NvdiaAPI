@@ -10,6 +10,11 @@ if [ -n "$TAVILY_API_KEY" ]; then
   echo "[entrypoint] TAVILY_API_KEY prefix: $(printf '%s' "$TAVILY_API_KEY" | cut -c1-12)..."
 fi
 
+# Locate the global node_modules dir so subsequent node -e scripts can require openclaw
+GLOBAL_MODULES="$(npm root -g 2>/dev/null)"
+echo "[entrypoint] global node_modules: $GLOBAL_MODULES"
+export NODE_PATH="$GLOBAL_MODULES"
+
 # Patch config: enable Tavily, inject API key, set tools.web.search
 node -e "
 const fs = require('fs');
@@ -44,16 +49,22 @@ console.log('[entrypoint] tools.web.search=' + JSON.stringify(cfg.tools.web.sear
 console.log('[entrypoint] tools.profile=' + (cfg.tools.profile || 'unset'));
 "
 
-# Preflight: verify Tavily plugin files exist and try to load + register
 echo "[entrypoint] === TAVILY PREFLIGHT ==="
 node -e "
 const fs = require('fs');
 const path = require('path');
-let openclawPkg;
-try { openclawPkg = require.resolve('openclaw/package.json'); }
-catch(e) { console.log('[preflight] FATAL: cannot resolve openclaw package:', e.message); process.exit(0); }
-const ocRoot = path.dirname(openclawPkg);
-console.log('[preflight] openclaw root:', ocRoot);
+const Module = require('module');
+const globalRoot = process.env.NODE_PATH || '';
+console.log('[preflight] NODE_PATH:', globalRoot);
+let ocRoot;
+try {
+  ocRoot = path.join(globalRoot, 'openclaw');
+  if (!fs.existsSync(ocRoot)) {
+    // fall back to npm root -g default location
+    ocRoot = '/usr/local/lib/node_modules/openclaw';
+  }
+} catch(e) {}
+console.log('[preflight] openclaw root:', ocRoot, 'exists=', fs.existsSync(ocRoot));
 const tavilyDir = path.join(ocRoot, 'dist', 'extensions', 'tavily');
 console.log('[preflight] tavily dir exists:', fs.existsSync(tavilyDir));
 if (fs.existsSync(tavilyDir)) {
@@ -65,27 +76,43 @@ if (fs.existsSync(tavilyDir)) {
     console.log('[preflight] tavily contracts:', JSON.stringify(m.contracts || {}));
   }
 }
-// Try to require the tavily entry directly
+
+// Try to require the tavily entry directly. CRITICAL: Module._resolveFilename respects NODE_PATH only at startup;
+// to require a globally-installed module, we use the absolute path.
+let tavilyMod = null;
 try {
-  const mod = require(path.join(tavilyDir, 'index.js'));
-  console.log('[preflight] tavily module loaded. exports:', Object.keys(mod).join(', '));
-  if (typeof mod.register === 'function') {
-    let registered = null;
-    const fakeApi = {
-      registerWebSearchProvider: (p) => { registered = p; },
-      logger: { info: ()=>{}, warn: ()=>{}, error: ()=>{}, debug: ()=>{} }
-    };
-    try {
-      mod.register(fakeApi);
-      console.log('[preflight] tavily.register() OK. provider id:', registered && registered.id);
-    } catch(e) {
-      console.log('[preflight] tavily.register() THREW:', e.message);
-      console.log(e.stack);
-    }
-  }
+  tavilyMod = require(path.join(tavilyDir, 'index.js'));
+  console.log('[preflight] tavily module loaded. exports:', Object.keys(tavilyMod).join(', '));
 } catch(e) {
   console.log('[preflight] FAILED to require tavily:', e.message);
-  console.log('[preflight] stack:', e.stack);
+  console.log('[preflight] stack first 600:', (e.stack || '').slice(0, 600));
+}
+
+// Try to register Tavily with a fake API
+let providerRef = null;
+if (tavilyMod && typeof tavilyMod.register === 'function') {
+  const fakeApi = {
+    registerWebSearchProvider: (p) => { providerRef = p; console.log('[preflight] registerWebSearchProvider called with id:', p && p.id); },
+    logger: { info: (...a)=>console.log('[plugin/tavily/info]', ...a), warn: (...a)=>console.log('[plugin/tavily/warn]', ...a), error: (...a)=>console.log('[plugin/tavily/error]', ...a), debug: ()=>{} },
+    config: { webSearch: { apiKey: process.env.TAVILY_API_KEY } },
+  };
+  try {
+    tavilyMod.register(fakeApi);
+    console.log('[preflight] tavily.register() OK. provider id:', providerRef && providerRef.id);
+  } catch(e) {
+    console.log('[preflight] tavily.register() THREW:', e.message);
+    console.log('[preflight] stack first 600:', (e.stack || '').slice(0, 600));
+  }
+}
+
+// If we have a provider, attempt a live search to confirm the API key works
+if (providerRef && typeof providerRef.search === 'function') {
+  console.log('[preflight] attempting live tavily search...');
+  Promise.resolve(providerRef.search({ query: 'test', maxResults: 1 }))
+    .then(r => console.log('[preflight] tavily.search OK. hits=' + (Array.isArray(r && r.results) ? r.results.length : 'unknown')))
+    .catch(err => console.log('[preflight] tavily.search FAILED:', err && err.message));
+} else if (providerRef) {
+  console.log('[preflight] provider methods:', Object.keys(providerRef).join(', '));
 }
 " || echo "[preflight] node script crashed"
 
