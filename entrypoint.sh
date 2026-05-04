@@ -88,31 +88,48 @@ try {
   console.log('[preflight] stack first 600:', (e.stack || '').slice(0, 600));
 }
 
-// Try to register Tavily with a fake API
+// Tavily is an ES module — unwrap default export. The OpenClaw plugin loader probably also does this.
+let pluginEntry = null;
+if (tavilyMod) {
+  // candidates: top-level register, default.register, default itself if it's a function (named-export factory)
+  if (typeof tavilyMod.register === 'function') pluginEntry = tavilyMod;
+  else if (tavilyMod.default) {
+    if (typeof tavilyMod.default.register === 'function') pluginEntry = tavilyMod.default;
+    else if (typeof tavilyMod.default === 'function') pluginEntry = { register: tavilyMod.default };
+  }
+  console.log('[preflight] tavilyMod.default keys:', tavilyMod.default ? Object.keys(tavilyMod.default).join(',') : 'none');
+  console.log('[preflight] pluginEntry resolved:', pluginEntry ? 'YES' : 'NO');
+  if (pluginEntry) console.log('[preflight] pluginEntry methods:', Object.keys(pluginEntry).join(','));
+}
+
 let providerRef = null;
-if (tavilyMod && typeof tavilyMod.register === 'function') {
+if (pluginEntry && typeof pluginEntry.register === 'function') {
   const fakeApi = {
     registerWebSearchProvider: (p) => { providerRef = p; console.log('[preflight] registerWebSearchProvider called with id:', p && p.id); },
+    registerTool: (t) => console.log('[preflight] registerTool called with name:', t && t.name),
     logger: { info: (...a)=>console.log('[plugin/tavily/info]', ...a), warn: (...a)=>console.log('[plugin/tavily/warn]', ...a), error: (...a)=>console.log('[plugin/tavily/error]', ...a), debug: ()=>{} },
     config: { webSearch: { apiKey: process.env.TAVILY_API_KEY } },
+    pluginConfig: { webSearch: { apiKey: process.env.TAVILY_API_KEY } },
   };
   try {
-    tavilyMod.register(fakeApi);
-    console.log('[preflight] tavily.register() OK. provider id:', providerRef && providerRef.id);
+    const result = pluginEntry.register(fakeApi);
+    console.log('[preflight] tavily.register() OK. result type:', typeof result, 'provider captured:', !!providerRef);
+    if (providerRef) console.log('[preflight] provider:', JSON.stringify({ id: providerRef.id, methods: Object.keys(providerRef) }));
   } catch(e) {
     console.log('[preflight] tavily.register() THREW:', e.message);
     console.log('[preflight] stack first 600:', (e.stack || '').slice(0, 600));
   }
 }
 
-// If we have a provider, attempt a live search to confirm the API key works
 if (providerRef && typeof providerRef.search === 'function') {
-  console.log('[preflight] attempting live tavily search...');
-  Promise.resolve(providerRef.search({ query: 'test', maxResults: 1 }))
-    .then(r => console.log('[preflight] tavily.search OK. hits=' + (Array.isArray(r && r.results) ? r.results.length : 'unknown')))
+  console.log('[preflight] attempting live tavily search with API key...');
+  Promise.resolve(providerRef.search({ query: 'openai news', maxResults: 1 }))
+    .then(r => {
+      const hits = (r && (r.results || r.hits || [])) || [];
+      console.log('[preflight] tavily.search OK. hits=' + hits.length);
+      if (hits[0]) console.log('[preflight] first hit title:', hits[0].title || hits[0].url || JSON.stringify(hits[0]).slice(0,120));
+    })
     .catch(err => console.log('[preflight] tavily.search FAILED:', err && err.message));
-} else if (providerRef) {
-  console.log('[preflight] provider methods:', Object.keys(providerRef).join(', '));
 }
 " || echo "[preflight] node script crashed"
 
