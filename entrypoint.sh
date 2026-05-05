@@ -3,6 +3,25 @@ set -e
 mkdir -p /root/.openclaw/credentials
 printf '%s' "$OPENCLAW_CONFIG" > /root/.openclaw/openclaw.json
 
+# === BUSINESS HOURS GATE ===
+# Bot runs only between 8 AM and 6 PM CDT (13:00-23:00 UTC).
+# Container is started by Railway cron at 13:00 UTC; this block kills
+# the gateway at 23:00 UTC so the container exits and stays off until
+# the next morning's cron firing.
+SHUTDOWN_HOUR_UTC=23
+NOW_HOUR=$(date -u +%-H)
+NOW_MIN=$(date -u +%-M)
+NOW_SEC=$(date -u +%-S)
+NOW_TOTAL=$((NOW_HOUR * 3600 + NOW_MIN * 60 + NOW_SEC))
+TARGET_TOTAL=$((SHUTDOWN_HOUR_UTC * 3600))
+SECONDS_REMAINING=$((TARGET_TOTAL - NOW_TOTAL))
+if [ "$SECONDS_REMAINING" -le 0 ]; then
+  echo "[entrypoint] Container started at $(date -u +%H:%M) UTC, past business hours (closes 23:00 UTC). Exiting."
+  exit 0
+fi
+echo "[entrypoint] Business hours: bot will shut down in ${SECONDS_REMAINING}s (at 23:00 UTC / 18:00 CDT)"
+( sleep "$SECONDS_REMAINING" && echo "[shutdown] 6 PM CDT reached, terminating gateway" && kill -TERM 1 ) &
+
 echo "[entrypoint] === BOOT DIAGNOSTICS ==="
 echo "[entrypoint] OPENCLAW_CONFIG length: $(printf '%s' "$OPENCLAW_CONFIG" | wc -c)"
 echo "[entrypoint] TAVILY_API_KEY set: $([ -n "$TAVILY_API_KEY" ] && echo YES || echo NO)"
